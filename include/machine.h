@@ -115,6 +115,20 @@ class Machine {
   int vcpu_priority_ = 1;
   std::string vcpu_vendor_;
   std::string vcpu_model_;
+  /* CPU signature mode:
+   *   "default" / ""    - the legacy built-in signature (family 15)
+   *   "host_model"      - the host's family/model/stepping, features masked
+   *   "host_passthrough"- the host's CPUID verbatim, features not masked
+   *   "custom"          - use vcpu_arch_ from the built-in model table
+   * See kCpuModels in core/vcpu.cc for the accepted arch names. */
+  std::string vcpu_type_;
+  /* Built-in model name, only meaningful when vcpu_type_ == "custom". */
+  std::string vcpu_arch_;
+  /* Expose hardware virtualization to the guest: VMX on Intel, SVM on AMD.
+   * -1 = not configured (default: on for host_passthrough, off otherwise).
+   * Useful for nested virtualization, and for debugging guests that behave
+   * differently depending on whether VMX/SVM is advertised. */
+  int vcpu_virt_ = -1;
   std::vector<Vcpu*> vcpus_;
   MemoryManager* memory_manager_;
   DeviceManager* device_manager_;

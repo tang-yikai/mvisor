@@ -238,6 +238,15 @@ void Configuration::LoadMachine(const YAML::Node& node) {
     if (cpuid["model"]) {
       machine_->vcpu_model_ = cpuid["model"].as<std::string>();
     }
+    if (cpuid["type"]) {
+      machine_->vcpu_type_ = cpuid["type"].as<std::string>();
+    }
+    if (cpuid["arch"]) {
+      machine_->vcpu_arch_ = cpuid["arch"].as<std::string>();
+    }
+    if (cpuid["virt"]) {
+      machine_->vcpu_virt_ = cpuid["virt"].as<bool>() ? 1 : 0;
+    }
   }
   if (node["priority"]) {
     machine_->vcpu_priority_ = node["priority"].as<uint64_t>();

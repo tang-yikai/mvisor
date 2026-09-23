@@ -66,6 +66,11 @@
 #define CPUID_EXT_MONITOR  (1U << 3)
 #define CPUID_EXT_DSCPL    (1U << 4)
 #define CPUID_EXT_VMX      (1U << 5)
+
+/* CPUID leaf 0x80000001 ECX bits. The CPUID_EXT2_* group further down is the
+ * EDX register of the same leaf, hence the separate EXT3 prefix. */
+#define CPUID_EXT3_LAHF    (1U << 0)  /* LAHF/SAHF present (x86-64-v2+) */
+#define CPUID_EXT3_SVM     (1U << 2)  /* AMD Secure Virtual Machine (AMD-V) */
 #define CPUID_EXT_SMX      (1U << 6)
 #define CPUID_EXT_EST      (1U << 7)
 #define CPUID_EXT_TM2      (1U << 8)

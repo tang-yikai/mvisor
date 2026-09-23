@@ -95,13 +95,199 @@ void Vcpu::Reset() {
  * architecture-instruction-set-extensions-programming-reference.pdf
  * Model: Skylake-Server Compatible
  */
-#define CPU_VERSION(family, model, stepping) \
-  (((family & 0xF) << 8) | (((model >> 4) & 0xF) << 16) | ((model & 0xF) << 4) | (stepping & 0xF))
+/* Encode family/model/stepping into CPUID leaf 1 EAX, using the standard x86
+ * scheme shared by Intel and AMD: when family >= 0xF the base field is forced
+ * to 0xF and the real value goes into the extended-family field, likewise for
+ * model >= 0xF. (The old version masked family with 0xF, which silently turned
+ * an AMD family of 0x17/0x19 into 7.) */
+static uint32_t CPU_VERSION(uint32_t family, uint32_t model, uint32_t stepping) {
+  /* When family >= 0xF the base family field is pinned to 0xF and the real
+   * value is carried in the extended-family field (this is how AMD encodes
+   * 0x17/0x19; using `family & 0xF` would turn it into 7). */
+  uint32_t base_family = family >= 0xF ? 0xF : family;
+  uint32_t eax = (stepping & 0xF) | ((model & 0xF) << 4) | (base_family << 8);
+  if (family >= 0xF) {
+    eax |= ((family - 0xF) & 0xFF) << 20;
+  }
+  if (model >= 0xF) {
+    eax |= ((model >> 4) & 0xF) << 16;
+  }
+  return eax;
+}
+
+/* Built-in CPU models selectable through machine.cpuid.type. Only Intel models
+ * are listed because CPU_VERSION() encodes the legacy family/model layout; an
+ * AMD family (0x17/0x19) would need the extended fields as well. */
+struct CpuModelEntry {
+  const char*   name;
+  const char*   vendor;
+  uint32_t      family;
+  uint32_t      model;
+  uint32_t      stepping;
+};
+
+static const CpuModelEntry kCpuModels[] = {
+  /* Intel */
+  { "nehalem",         "GenuineIntel", 6,    26,  5 },
+  { "westmere",        "GenuineIntel", 6,    44,  2 },
+  { "sandybridge",     "GenuineIntel", 6,    42,  7 },
+  { "ivybridge",       "GenuineIntel", 6,    58,  9 },
+  { "haswell",         "GenuineIntel", 6,    60,  3 },
+  { "broadwell",       "GenuineIntel", 6,    61,  4 },
+  { "skylake",         "GenuineIntel", 6,    94,  3 },
+  { "skylake-server",  "GenuineIntel", 6,    85,  4 },
+  { "cascadelake",     "GenuineIntel", 6,    85,  7 },
+  { "icelake",         "GenuineIntel", 6,    106, 6 },
+  { "icelake-server",  "GenuineIntel", 6,    106, 6 },
+  { "tigerlake",       "GenuineIntel", 6,    140, 1 },
+  { "rocketlake",      "GenuineIntel", 6,    167, 1 },
+  { "alderlake",       "GenuineIntel", 6,    151, 2 },
+  { "raptorlake",      "GenuineIntel", 6,    183, 1 },
+  { "sapphirerapids",  "GenuineIntel", 6,    143, 4 },
+  /* AMD: Zen generations, plus the EPYC codenames people usually know them by */
+  { "zen",             "AuthenticAMD", 0x17, 0x01, 2 },  /* Naples */
+  { "zen-plus",        "AuthenticAMD", 0x17, 0x08, 2 },
+  { "zen2",            "AuthenticAMD", 0x17, 0x31, 0 },  /* Rome   */
+  { "zen3",            "AuthenticAMD", 0x19, 0x01, 1 },  /* Milan  */
+  { "zen4",            "AuthenticAMD", 0x19, 0x11, 1 },  /* Genoa  */
+  { "epyc-naples",     "AuthenticAMD", 0x17, 0x01, 2 },
+  { "epyc-rome",       "AuthenticAMD", 0x17, 0x31, 0 },
+  { "epyc-milan",      "AuthenticAMD", 0x19, 0x01, 1 },
+  { "epyc-genoa",      "AuthenticAMD", 0x19, 0x11, 1 },
+};
+
+static const CpuModelEntry* LookupCpuModel(const std::string& name) {
+  for (auto& entry : kCpuModels) {
+    if (name == entry.name) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+/* Default CPUID leaf 7 EBX whitelist: HLE, RTM and MPX are intentionally
+ * dropped. */
+static const uint32_t kEbx7Default =
+  CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_AVX2 |
+  CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS |
+  CPUID_7_0_EBX_INVPCID | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
+  CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_CLWB | CPUID_7_0_EBX_AVX512F |
+  CPUID_7_0_EBX_AVX512DQ | CPUID_7_0_EBX_AVX512BW | CPUID_7_0_EBX_AVX512CD |
+  CPUID_7_0_EBX_AVX512VL | CPUID_7_0_EBX_CLFLUSHOPT;
+
+static const uint32_t kEbx7NoAvx512 = kEbx7Default & ~(
+  CPUID_7_0_EBX_AVX512F | CPUID_7_0_EBX_AVX512DQ | CPUID_7_0_EBX_AVX512BW |
+  CPUID_7_0_EBX_AVX512CD | CPUID_7_0_EBX_AVX512VL);
+
+/* x86-64 psABI microarchitecture levels, also selectable through cpuid.arch.
+ * A level is a feature set rather than a specific CPU, so the signature below
+ * is only "the generation that introduced it". v1/v2 predate CPUID leaf 7
+ * entirely, hence the empty EBX whitelist there. */
+struct CpuLevelEntry {
+  const char* name;
+  uint32_t    family, model, stepping;
+  uint32_t    leaf7_ebx;   /* CPUID leaf 7 EBX whitelist */
+  bool        has_avx;     /* leaf 1 ECX: AVX, F16C, XSAVE, OSXSAVE, FMA */
+  bool        has_sse4;    /* leaf 1 ECX: SSE4.1/4.2, POPCNT, CX16 */
+  bool        has_lahf;    /* CPUID 0x80000001 ECX: LAHF/SAHF */
+};
+
+static const CpuLevelEntry kCpuLevels[] = {
+  /* name          family model step  leaf7_ebx       avx    sse4   lahf  */
+  { "x86-64",      6,     15,   11,   0,              false, false, false },
+  { "x86-64-v2",   6,     26,   5,    0,              false, true,  true  },
+  { "x86-64-v3",   6,     60,   3,    kEbx7NoAvx512,  true,  true,  true  },
+  { "x86-64-v4",   6,     85,   4,    kEbx7Default,   true,  true,  true  },
+};
+
+static const CpuLevelEntry* LookupCpuLevel(const std::string& name) {
+  for (auto& entry : kCpuLevels) {
+    if (name == entry.name) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+/* Vendor string reported by the host CPU (CPUID leaf 0). */
+static std::string HostCpuVendor(kvm_cpuid2* cpuid) {
+  for (uint i = 0; i < cpuid->nent; i++) {
+    auto entry = &cpuid->entries[i];
+    if (entry->function == 0x0 && entry->index == 0) {
+      char vendor[13] = {};
+      memcpy(&vendor[0], &entry->ebx, 4);
+      memcpy(&vendor[4], &entry->edx, 4);
+      memcpy(&vendor[8], &entry->ecx, 4);
+      return std::string(vendor);
+    }
+  }
+  return std::string();
+}
 
 void Vcpu::SetupCpuid() {
-  cpuid_version_ = CPU_VERSION(15, 1, 0);
+  const std::string& type = machine_->vcpu_type_;
+  const CpuModelEntry* named_model = nullptr;
+  const CpuLevelEntry* named_level = nullptr;
+  bool host_signature = false;
+  bool mask_features = true;
+
+  if (type.empty() || type == "default") {
+    cpuid_version_ = CPU_VERSION(15, 1, 0);
+  } else if (type == "host_model") {
+    host_signature = true;
+  } else if (type == "host_passthrough") {
+    host_signature = true;
+    mask_features = false;
+  } else if (type == "custom") {
+    if (machine_->vcpu_arch_.empty()) {
+      MV_PANIC("cpuid.type 'custom' requires cpuid.arch to name a model or a level");
+    }
+    named_model = LookupCpuModel(machine_->vcpu_arch_);
+    if (named_model != nullptr) {
+      cpuid_version_ = CPU_VERSION(named_model->family, named_model->model, named_model->stepping);
+    } else {
+      named_level = LookupCpuLevel(machine_->vcpu_arch_);
+      if (named_level == nullptr) {
+        MV_PANIC("unknown cpuid.arch '%s', expected a model name (kCpuModels) or a level "
+          "(x86-64, x86-64-v2, x86-64-v3, x86-64-v4)", machine_->vcpu_arch_.c_str());
+      }
+      cpuid_version_ = CPU_VERSION(named_level->family, named_level->model, named_level->stepping);
+    }
+  } else {
+    MV_PANIC("unknown cpuid.type '%s', expected default / host_model / host_passthrough / custom", type.c_str());
+  }
+
+  /* Expose hardware virtualization to the guest: VMX on Intel, SVM on AMD.
+   * Default is on for host_passthrough (the guest is supposed to look like the
+   * host) and off otherwise; cpuid.virt overrides it either way. */
+  bool expose_virt = machine_->vcpu_virt_ >= 0
+    ? (machine_->vcpu_virt_ != 0)
+    : (type == "host_passthrough");
+
+  /* Feature whitelists. A named level trims them further; a named model keeps
+   * the defaults. */
+  uint32_t ebx7_mask = kEbx7Default;
+  uint32_t ecx1_clear = 0;
+  uint32_t ecext1_clear = 0;
+  if (named_level != nullptr) {
+    ebx7_mask = named_level->leaf7_ebx;
+    if (!named_level->has_avx) {
+      ecx1_clear |= CPUID_EXT_AVX | CPUID_EXT_F16C | CPUID_EXT_XSAVE |
+        CPUID_EXT_OSXSAVE | CPUID_EXT_FMA;
+    }
+    if (!named_level->has_sse4) {
+      ecx1_clear |= CPUID_EXT_SSE41 | CPUID_EXT_SSE42 | CPUID_EXT_POPCNT |
+        CPUID_EXT_CX16;
+    }
+    if (!named_level->has_lahf) {
+      ecext1_clear |= CPUID_EXT3_LAHF;
+    }
+  }
+
   if (!machine_->vcpu_model_.empty()) {
     cpuid_model_ = machine_->vcpu_model_;
+  } else if (named_model != nullptr) {
+    cpuid_model_ = named_model->name;
   } else {
     cpuid_model_ = "Intel Compatible Processor";
   }
@@ -111,6 +297,29 @@ void Vcpu::SetupCpuid() {
 
   if (ioctl(machine_->kvm_fd_, KVM_GET_SUPPORTED_CPUID, cpuid) < 0) {
     MV_PANIC("failed to get supported CPUID");
+  }
+
+  /* A model from the other vendor is allowed but worth a warning: a guest that
+   * boots from disk re-reads CPUID, so running an Intel model on an AMD host
+   * (or vice versa) is legitimate as long as the host actually implements the
+   * requested features - which KVM_SET_CPUID2 validates right below. Only a
+   * memory snapshot restore really requires the vendor to match. */
+  if (named_model != nullptr) {
+    auto host_vendor = HostCpuVendor(cpuid);
+    if (!host_vendor.empty() && host_vendor != named_model->vendor) {
+      MV_WARN("cpuid.arch '%s' is a %s model, but this host CPU reports '%s'; continuing, "
+        "KVM will reject any feature this host cannot provide",
+        named_model->name, named_model->vendor, host_vendor.c_str());
+    }
+  }
+
+  if (host_signature) {
+    MV_LOG("cpuid: type='%s' signature=<host> model='%s' vmx/svm=%d",
+      type.c_str(), cpuid_model_.c_str(), expose_virt);
+  } else {
+    MV_LOG("cpuid: type='%s' arch='%s' signature=0x%05X model='%s' vmx/svm=%d avx512=%d",
+      type.c_str(), machine_->vcpu_arch_.c_str(), cpuid_version_, cpuid_model_.c_str(),
+      expose_virt, (ebx7_mask & CPUID_7_0_EBX_AVX512F) != 0);
   }
 
   for (uint i = 0; i < cpuid->nent; i++) {
@@ -130,15 +339,22 @@ void Vcpu::SetupCpuid() {
       break;
     }
     case 0x1: { // ACPI ID & Features
-      entry->eax = cpuid_version_;
+      /* host_model / host_passthrough keep the host's family/model/stepping */
+      if (!host_signature) {
+        entry->eax = cpuid_version_;
+      }
       entry->ebx = (vcpu_id_ << 24) | (machine_->num_vcpus_ << 16) | (entry->ebx & 0xFFFF);
 
       bool tsc_deadline = ioctl(machine_->kvm_fd_, KVM_CHECK_EXTENSION, KVM_CAP_TSC_DEADLINE_TIMER);
       ALTER_FEATURE(entry->ecx, CPUID_EXT_TSC_DEADLINE_TIMER, tsc_deadline);
       ALTER_FEATURE(entry->ecx, CPUID_EXT_HYPERVISOR, machine_->hypervisor_);
       ALTER_FEATURE(entry->ecx, CPUID_EXT_PDCM, false); // Disable PMU
+      ALTER_FEATURE(entry->ecx, CPUID_EXT_VMX, expose_virt); // Intel VT-x
       ALTER_FEATURE(entry->edx, CPUID_HT, true);  // Max ACPI IDs reserved field is valid
       ALTER_FEATURE(entry->edx, CPUID_SS, false); // Self snoop
+      if (mask_features) {
+        entry->ecx &= ~ecx1_clear; // x86-64-vN level trimming
+      }
 
       cpuid_features_ = (uint64_t(entry->edx) << 32) | entry->ecx;
       break;
@@ -146,16 +362,10 @@ void Vcpu::SetupCpuid() {
     case 0x2: // Cache and TLB Information
       break;
     case 0x7: // Extended CPU features 7
-      if (entry->index == 0) {
-        // Disable HLE, RTM, MPX (Intel Memory Protection Extensions)
-        entry->ebx &= (CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
-          CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_BMI2 |
-          CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
-          CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
-          CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_CLWB |
-          CPUID_7_0_EBX_AVX512F | CPUID_7_0_EBX_AVX512DQ |
-          CPUID_7_0_EBX_AVX512BW | CPUID_7_0_EBX_AVX512CD |
-          CPUID_7_0_EBX_AVX512VL | CPUID_7_0_EBX_CLFLUSHOPT);
+      if (entry->index == 0 && mask_features) {
+        // Disable HLE, RTM, MPX (Intel Memory Protection Extensions), plus
+        // anything outside the selected model/level whitelist.
+        entry->ebx &= ebx7_mask;
         // Disable PKU
         entry->ecx &= 0;
         entry->edx &= 0;
@@ -165,12 +375,16 @@ void Vcpu::SetupCpuid() {
       entry->edx = vcpu_id_;
       break;
     case 0xD:
-      if (entry->index == 0) {
+      if (entry->index == 0 && mask_features) {
         entry->eax &= 0x2E7; // MPX is disabled in CPU features 7
       }
       break;
     case 0x80000001:
-      entry->ecx &= ~(1U << 22); // Disable Topology Extensions
+      if (mask_features) {
+        entry->ecx &= ~(1U << 22); // Disable Topology Extensions
+        entry->ecx &= ~ecext1_clear; // x86-64-vN level trimming
+      }
+      ALTER_FEATURE(entry->ecx, CPUID_EXT3_SVM, expose_virt); // AMD-V
       break;
     case 0x80000002 ... 0x80000004: { // CPU Model String
       char cpu_model[51] = {};
