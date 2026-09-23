@@ -51,6 +51,7 @@ class SpiceAgent : public Device, public SerialPort,
   uint32_t                        max_clipboard_ = 1024 * 1024;
 
  public:
+  using SerialPort::SendMessage;
   SpiceAgent() {
     set_default_parent_class("VirtioConsole");
 

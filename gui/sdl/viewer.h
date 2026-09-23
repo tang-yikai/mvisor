@@ -100,6 +100,7 @@ class Viewer {
   PendingResize pending_resize_;
 
   bool pcm_playback_error_ = false;
+  bool record_unavailable_ = false;
   snd_pcm_t* pcm_playback_ = nullptr;
   std::unordered_map<int, VoidCallback> keyboard_shortcuts_;
 };

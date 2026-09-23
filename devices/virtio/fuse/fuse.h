@@ -114,9 +114,14 @@ class Fuse {
 
   inline struct UserConfig user_config() const { return user_config_; }
 
-  inline bool IsDiskSpaceLeftEnough(uint64_t size) { return disk_info_.size_used + size <= disk_info_.size_limit; }
+  /* A limit of 0 means "not configured": no quota is enforced. */
+  inline bool IsDiskSpaceLeftEnough(uint64_t size) {
+    return disk_info_.size_limit == 0 || disk_info_.size_used + size <= disk_info_.size_limit;
+  }
 
-  inline bool IsInodeListFull() { return inode_list_.size() > disk_info_.inode_limit; }
+  inline bool IsInodeListFull() {
+    return disk_info_.inode_limit != 0 && inode_list_.size() > disk_info_.inode_limit;
+  }
 
   inline void CostDiskSpace(uint64_t size) { disk_info_.size_used += size; }
 

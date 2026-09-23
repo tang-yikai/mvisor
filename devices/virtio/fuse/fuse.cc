@@ -48,7 +48,20 @@ Fuse::Fuse(std::string& mount_path, uint64_t disk_size_limit, uint64_t inode_cou
   disk_info_.size_limit = disk_size_limit;
   disk_info_.inode_limit = inode_count_limit;
   UpdateDiskInfo();
-  MV_ASSERT(disk_info_.size_limit >= disk_info_.size_used && disk_info_.inode_limit >= disk_info_.inode_count);
+
+  /* A configured limit that is already exceeded must not abort the VM.
+   * Raise it to the current usage, consistent with ModifyDiskInformationToVm().
+   * A limit of 0 means "not configured" and stays untouched. */
+  if (disk_info_.size_limit && disk_info_.size_used > disk_info_.size_limit) {
+    MV_WARN("virtio-fs: disk_size limit %lu is below the %lu already used in %s, raising it",
+      (unsigned long)disk_info_.size_limit, (unsigned long)disk_info_.size_used, user_config_.source);
+    disk_info_.size_limit = disk_info_.size_used;
+  }
+  if (disk_info_.inode_limit && disk_info_.inode_count > disk_info_.inode_limit) {
+    MV_WARN("virtio-fs: inode_count limit %lu is below the %lu already used in %s, raising it",
+      (unsigned long)disk_info_.inode_limit, (unsigned long)disk_info_.inode_count, user_config_.source);
+    disk_info_.inode_limit = disk_info_.inode_count;
+  }
 }
 
 Fuse::~Fuse() {
@@ -115,21 +128,34 @@ struct Inode* Fuse::GetInodeFromStat(struct stat* stat) {
 }
 
 void Fuse::ModifyDiskInformationToVm(struct statvfs* new_stat_vfs) {
+  /* Both limits are 0 ("not configured"): report the host filesystem as-is. */
+  if (disk_info_.size_limit == 0 && disk_info_.inode_limit == 0) {
+    return;
+  }
+
   // we need to update disk info in case that the host files in mount path was updated
   UpdateDiskInfo();
 
   // the host can write in the mount path shared with vm
-  if (disk_info_.size_used > disk_info_.size_limit) {
+  if (disk_info_.size_limit && disk_info_.size_used > disk_info_.size_limit) {
     disk_info_.size_limit = disk_info_.size_used;
   }
-  if (disk_info_.inode_count > disk_info_.inode_limit) {
+  if (disk_info_.inode_limit && disk_info_.inode_count > disk_info_.inode_limit) {
     disk_info_.inode_limit = disk_info_.inode_count;
   }
 
-  new_stat_vfs->f_files = disk_info_.inode_limit;
-  new_stat_vfs->f_blocks = disk_info_.size_limit / BLOCK_SIZE;
-  new_stat_vfs->f_bfree = new_stat_vfs->f_bavail = (disk_info_.size_limit - disk_info_.size_used) / BLOCK_SIZE;
-  new_stat_vfs->f_ffree = new_stat_vfs->f_favail = disk_info_.inode_limit - inode_list_.size();
+  if (disk_info_.inode_limit) {
+    /* inode_list_ holds the currently open inodes, which may exceed the scan
+     * count guarded above; clamp so the subtraction can't underflow. */
+    auto inodes_open = inode_list_.size();
+    new_stat_vfs->f_files = disk_info_.inode_limit;
+    new_stat_vfs->f_ffree = new_stat_vfs->f_favail =
+      inodes_open < disk_info_.inode_limit ? disk_info_.inode_limit - inodes_open : 0;
+  }
+  if (disk_info_.size_limit) {
+    new_stat_vfs->f_blocks = disk_info_.size_limit / BLOCK_SIZE;
+    new_stat_vfs->f_bfree = new_stat_vfs->f_bavail = (disk_info_.size_limit - disk_info_.size_used) / BLOCK_SIZE;
+  }
 }
 
 void Fuse::ClearInodeList(bool clear_root) {

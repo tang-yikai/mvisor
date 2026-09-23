@@ -81,8 +81,10 @@ class VirtioFs : public VirtioPci, public VirtioFsInterface {
       MV_ASSERT(std::filesystem::exists(mount_path_));
       MV_ASSERT(std::filesystem::is_directory(mount_path_));
 
-      // set disk space
-      auto disk_size_limit = (uint64_t)2 * 1024 * 1024 * 1024;
+      /* Both limits are optional. When omitted they stay 0, which means
+       * "no limit": the shared directory is then reported to the guest with
+       * the host filesystem's real capacity, and writes are never rejected. */
+      uint64_t disk_size_limit = 0;
       if (has_key("disk_size")) {
         std::string disk_size = std::get<std::string>(key_values_["disk_size"]);
         if (disk_size.back() != 'G') {
@@ -92,8 +94,8 @@ class VirtioFs : public VirtioPci, public VirtioFsInterface {
         disk_size_limit = (1UL << 30) * value;
       }
 
-      // set inode count limit
-      uint64_t inode_count_limit = 200;
+      // set inode count limit, 0 means no limit
+      uint64_t inode_count_limit = 0;
       if (has_key("inode_count")) {
         inode_count_limit = std::get<uint64_t>(key_values_["inode_count"]);
       }

@@ -102,6 +102,13 @@ void Viewer::CreateWindow() {
     palette_ = SDL_AllocPalette(256);
   }
   UpdateCaption();
+
+  /* SDL doesn't clear a newly allocated surface, and the display only pushes
+   * incremental dirty rectangles to us. Anything we never receive an update
+   * for would keep uninitialized content. Start from black and ask for one
+   * full redraw, the same way the VNC backend does after initialization. */
+  SDL_FillRect(screen_surface_, nullptr, 0);
+  display_->Refresh();
 }
 
 void Viewer::UpdateCaption() {
@@ -294,11 +301,26 @@ void Viewer::OnPlayback(PlaybackState state, const std::string& data) {
       }
     }
     /* assume format is s16le */
-    auto frames = snd_pcm_writei(pcm_playback_, data.data(), data.size() / playback_format_.channels / 2);
-    if (frames < 0 && frames != -EAGAIN) {
-      MV_WARN("snd_pcm_writei failed: %s, ret=%d\n", snd_strerror(frames), frames);
-      snd_pcm_close(pcm_playback_);
-      pcm_playback_ = nullptr;
+    size_t frame_size = playback_format_.channels * 2;
+    size_t frames_total = data.size() / frame_size;
+    size_t frames_done = 0;
+    while (frames_done < frames_total) {
+      auto frames = snd_pcm_writei(pcm_playback_,
+        data.data() + frames_done * frame_size, frames_total - frames_done);
+      if (frames == -EAGAIN) {
+        /* Buffer is full, drop the rest of this batch */
+        break;
+      }
+      if (frames < 0) {
+        MV_WARN("snd_pcm_writei failed: %s, ret=%d\n", snd_strerror(frames), frames);
+        snd_pcm_close(pcm_playback_);
+        pcm_playback_ = nullptr;
+        break;
+      }
+      if (frames == 0) {
+        break;
+      }
+      frames_done += frames;
     }
     break;
   }
@@ -309,7 +331,7 @@ void Viewer::OnRecordback(RecordState state) {
   switch (state)
   {
   case kRecordStart:
-    if (record_) {
+    if (record_ && !record_unavailable_) {
       if (audio_spec_ == nullptr) {
         record_->GetRecordFormat(&record_format_.channels, &record_format_.frequency);
         
@@ -331,9 +353,20 @@ void Viewer::OnRecordback(RecordState state) {
         audio_device_id_ = 0;
       }
       
-      audio_device_id_ = SDL_OpenAudioDevice(nullptr, 1, audio_spec_, nullptr, 0);
+      /* SDL's "default" capture device (nullptr) fails to open on some
+       * PipeWire / PulseAudio setups even though capture devices exist,
+       * while an explicit device name works. */
+      const char* capture_device = nullptr;
+      if (SDL_GetNumAudioDevices(1) > 0) {
+        capture_device = SDL_GetAudioDeviceName(0, 1);
+      }
+
+      audio_device_id_ = SDL_OpenAudioDevice(capture_device, 1, audio_spec_, nullptr, 0);
       if (audio_device_id_ == 0) {
-        MV_PANIC("Failed to open audio device: %s", SDL_GetError());
+        /* A missing/unusable microphone on the host must not kill the whole
+         * VM: disable audio input for this session and keep running. */
+        MV_WARN("Failed to open audio capture device, audio input disabled: %s", SDL_GetError());
+        record_unavailable_ = true;
         break;
       }
 
