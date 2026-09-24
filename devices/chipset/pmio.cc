@@ -86,19 +86,31 @@ bool Pmio::LoadState(MigrationReader* reader) {
 }
 
 void Pmio::AcpiSuspend(uint8_t type) {
-  switch (type)
-  {
-  case 0: // soft power off
-    std::thread([this]() {
-      manager_->machine()->Pause();
-      MV_LOG("machine is power off");
-    }).detach();
-    break;
-  case 1: // suspend request
-    MV_PANIC("suspend is not supported");
+  /* SLP_TYP is firmware-defined. Our DSDT carries no _S5 object, so the OS
+   * uses 0 for S5 (soft off); some firmware instead declares _S5 with 5.
+   * 1..4 are the sleep states (S1/S2/S3/S4), which are not implemented - a
+   * guest asking for one is not a reason to kill or stop the VM.
+   *
+   * This is also the *only* reliable power-off signal. A guest that crashed
+   * or hung never sets SLP_EN, so it can never be mistaken for a shutdown. */
+  switch (type) {
+  case 0:  // S5 soft power off (the default when _S5 is absent)
+  case 5:  // S5 soft power off (explicit _S5 value)
+    if (manager_->machine()->powerdown_quit()) {
+      MV_LOG("guest requested power off (SLP_TYP=%d), exiting", type);
+      std::thread([this]() {
+        manager_->machine()->Quit();
+      }).detach();
+    } else {
+      MV_WARN("guest requested power off (SLP_TYP=%d), pausing instead (powerdown=pause)", type);
+      std::thread([this]() {
+        manager_->machine()->Pause();
+      }).detach();
+    }
     break;
   default:
-    MV_ERROR("unknown acpi suspend type=%d", type);
+    MV_WARN("guest requested ACPI sleep state SLP_TYP=%d, which is not implemented; "
+      "ignoring the request and keeping the VM running", type);
     break;
   }
 }

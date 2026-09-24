@@ -78,6 +78,7 @@ class Machine {
   inline uint64_t ram_size() { return ram_size_; }
   inline bool debug() { return debug_; }
   inline bool hypervisor() { return hypervisor_; }
+  inline bool powerdown_quit() { return powerdown_quit_; }
   inline const std::string& guest_os() const { return guest_os_; }
   inline const std::string& vm_name() const { return vm_name_; }
   inline const std::string& vm_uuid() const { return vm_uuid_; }
@@ -129,6 +130,10 @@ class Machine {
    * Useful for nested virtualization, and for debugging guests that behave
    * differently depending on whether VMX/SVM is advertised. */
   int vcpu_virt_ = -1;
+  /* What to do when the guest requests an ACPI S5 soft power off:
+   *   true  - quit the mvisor process (default)
+   *   false - only pause the VM so the state can be inspected */
+  bool powerdown_quit_ = true;
   std::vector<Vcpu*> vcpus_;
   MemoryManager* memory_manager_;
   DeviceManager* device_manager_;

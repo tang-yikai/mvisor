@@ -7,6 +7,15 @@ DefinitionBlock(
     1               // OEM revision
 ) {
 
+    // Declare S5 soft-off support at root scope. Without this the OS assumes
+    // the platform cannot power itself off, never writes SLP_EN, and the guest
+    // just hangs after "Power down". SLP_TYP is platform defined and must
+    // match what the PM controller expects (Pmio::AcpiSuspend, case 0).
+    Name(\_S5, Package(0x02) {
+        0x00,           // PM1a SLP_TYP
+        0x00            // PM1b SLP_TYP
+    })
+
     // Device object for the PCI root bus
     Scope(\_SB) {
         Device(PCI0) {

@@ -313,13 +313,17 @@ void Vcpu::SetupCpuid() {
     }
   }
 
-  if (host_signature) {
-    MV_LOG("cpuid: type='%s' signature=<host> model='%s' vmx/svm=%d",
-      type.c_str(), cpuid_model_.c_str(), expose_virt);
-  } else {
-    MV_LOG("cpuid: type='%s' arch='%s' signature=0x%05X model='%s' vmx/svm=%d avx512=%d",
-      type.c_str(), machine_->vcpu_arch_.c_str(), cpuid_version_, cpuid_model_.c_str(),
-      expose_virt, (ebx7_mask & CPUID_7_0_EBX_AVX512F) != 0);
+  /* Report once, from the first vcpu, and only when debugging is on: the
+   * signature is identical for every vcpu and would otherwise flood the log. */
+  if (machine_->debug() && vcpu_id_ == 0) {
+    if (host_signature) {
+      MV_LOG("cpuid: type='%s' signature=<host> model='%s' vmx/svm=%d",
+        type.c_str(), cpuid_model_.c_str(), expose_virt);
+    } else {
+      MV_LOG("cpuid: type='%s' arch='%s' signature=0x%05X model='%s' vmx/svm=%d avx512=%d",
+        type.c_str(), machine_->vcpu_arch_.c_str(), cpuid_version_, cpuid_model_.c_str(),
+        expose_virt, (ebx7_mask & CPUID_7_0_EBX_AVX512F) != 0);
+    }
   }
 
   for (uint i = 0; i < cpuid->nent; i++) {

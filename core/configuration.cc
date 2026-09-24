@@ -262,6 +262,18 @@ void Configuration::LoadMachine(const YAML::Node& node) {
   if (node["hypervisor"]) {
     machine_->hypervisor_ = node["hypervisor"].as<bool>();
   }
+  if (node["powerdown"]) {
+    /* "quit" (default) exits mvisor when the guest requests ACPI S5;
+     * "pause" leaves the process alive so the halted state can be inspected. */
+    auto value = node["powerdown"].as<std::string>();
+    if (value == "quit") {
+      machine_->powerdown_quit_ = true;
+    } else if (value == "pause") {
+      machine_->powerdown_quit_ = false;
+    } else {
+      MV_PANIC("unknown powerdown '%s', expected quit or pause", value.c_str());
+    }
+  }
 }
 
 void Configuration::LoadObjects(const YAML::Node& objects_node) {
@@ -379,5 +391,6 @@ void Configuration::SaveMachine(YAML::Node& node) {
   node["vcpu"] = machine_->num_vcpus_;
   node["debug"] = machine_->debug_;
   node["hypervisor"] = machine_->hypervisor_;
+  node["powerdown"] = machine_->powerdown_quit_ ? "quit" : "pause";
   node["bios"] = bios_path_;
 }
