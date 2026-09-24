@@ -239,7 +239,7 @@ The classes that take configuration keys:
 
 | class | keys |
 |---|---|
-| `ata-disk` `ata-cdrom` `ide-disk` `ide-cdrom` `ahci-disk` `ahci-cdrom` `virtio-block` `floppy` | `image` (path), `readonly` (yes/no), `snapshot` (yes/no - discard writes when the VM exits) |
+| `ata-disk` `ata-cdrom` `ide-disk` `ide-cdrom` `ahci-disk` `ahci-cdrom` `virtio-block` `floppy` | `image` (path), `readonly` (yes/no), `snapshot` (yes/no - discard writes on exit, see [Disk snapshots](#disk-snapshots)) |
 | `virtio-network` | `mac`, `backend` (`tap`/`user`), `mtu`, `ifname` (tap), `map` (user, e.g. `tcp:0.0.0.0:8022-:22`) |
 | `virtio-fs` | `path`, `disk_name`, `disk_size`, `inode_count` |
 | `virtio-vgpu` | `memory`, `staging`, `blob`, `node` |
@@ -371,10 +371,44 @@ Three things worth knowing:
   MSRs and FPU state that do not move across vendors), while a different CPU
   model, RAM size or vCPU count only warns.
 
+## Disk snapshots
+
+Three different things are called "snapshot", and they do not overlap:
+
+| setting | where | type | meaning |
+|---|---|---|---|
+| `machine.snapshot` | `machine:` | path | **whole-machine** snapshot: RAM, device and vCPU state, plus disk state. See [Snapshots](#snapshots) |
+| `snapshot` | a disk device | yes/no | **this run does not persist**: the image is opened as a read-only backing file and every write goes to a temporary `snapshot_XXXXXX.qcow2` beside it (`/tmp/snapshot_XXXXXX.img` for raw images), which is deleted on exit |
+| `readonly` | a disk device | yes/no | **the guest sees a read-only disk**: `VIRTIO_BLK_F_RO` is set, so writes are refused rather than silently discarded |
+
+So `snapshot: yes` is the equivalent of QEMU's `snapshot=on` - handy for booting
+a guest, trying something and throwing the writes away. It is **not** a way to
+create a named, restorable disk snapshot.
+
+mvisor has no disk-snapshot management of its own; there is no `qemu-img
+snapshot` equivalent. Take disk snapshots **outside** mvisor instead:
+
+- **Volume snapshots** (LVM, ZFS, btrfs) are the simplest - mvisor just sees a
+  file on the snapshot volume.
+- **qcow2 backing file chains** also work: `qemu-img create -f qcow2 -b base.qcow2
+  -F qcow2 run.qcow2`, then point `image:` at `run.qcow2`.
+
+Two things to avoid:
+
+- **Do not use qcow2 *internal* snapshots.** `qemu-img snapshot -c` breaks
+  mvisor: the header's `nb_snapshots` becomes non-zero and it refuses to start
+  at all (`images/qcow2.cc` - `MV_PANIC("Qcow2 file with snapshots is not
+  supported yet")`).
+- **Stop mvisor before taking an external snapshot.** It keeps write caches, so
+  snapshotting a live image captures an inconsistent disk state.
+
 ## UEFI boot
 
-`machine.bios` is loaded at the top of the 4GB address space, so pointing it at
-an OVMF build is how you would switch the guest to UEFI:
+`machine.bios` says **which** firmware image to load, not *whether* to boot via
+UEFI. It is not an optional or UEFI-specific key: BIOS boot needs a firmware
+image just as much, and the built-in default (`share/bios-256k.bin`) *is*
+SeaBIOS. The key is loaded at the top of the 4GB address space, so pointing it
+at an OVMF build is how you would switch the guest to UEFI:
 
 ```yaml
 machine:
