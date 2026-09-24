@@ -274,6 +274,10 @@ void Configuration::LoadMachine(const YAML::Node& node) {
       MV_PANIC("unknown powerdown '%s', expected quit or pause", value.c_str());
     }
   }
+  if (node["snapshot"]) {
+    /* Snapshot directory; empty/absent disables snapshots entirely. */
+    machine_->snapshot_path_ = node["snapshot"].as<std::string>();
+  }
 }
 
 void Configuration::LoadObjects(const YAML::Node& objects_node) {
@@ -392,5 +396,8 @@ void Configuration::SaveMachine(YAML::Node& node) {
   node["debug"] = machine_->debug_;
   node["hypervisor"] = machine_->hypervisor_;
   node["powerdown"] = machine_->powerdown_quit_ ? "quit" : "pause";
+  if (!machine_->snapshot_path_.empty()) {
+    node["snapshot"] = machine_->snapshot_path_;
+  }
   node["bios"] = bios_path_;
 }

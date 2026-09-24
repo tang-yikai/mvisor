@@ -1,5 +1,11 @@
 # MVisor: A mini x86 hypervisor
 
+> **This is a fork of [tenclass/mvisor](https://github.com/tenclass/mvisor).**
+> Upstream is the original project; this fork adds a small set of local changes
+> on top of it, all listed under
+> [Local changes over upstream](#local-changes-over-upstream) and tagged
+> `local:` in the commit history.
+
 ## Goal
 
 1. A minimal hypervisor based on KVM and x86 (replace QEMU)
@@ -25,6 +31,24 @@
 
 
 
+## Local changes over upstream
+
+Everything in this section is specific to this fork; the
+[roadmap below](#roadmap-and-current-status) describes upstream's status, not
+ours. Each change is also a tagged commit.
+
+| change | tag | what it does |
+|---|---|---|
+| **Configurable CPU model** | `cpuid-20260923` | `machine.cpuid` lets you pick the vendor/model and a `type` + `arch` pair, plus VMX/SVM exposure through `virt`. Also fixes AMD family decoding, which truncated `0x17`/`0x19` to `7`. |
+| **Guest power off exits mvisor** | `poweroff-20260924` | Declares `_S5` in the i440fx and q35 DSDTs and quits when the guest sets `SLP_EN`, so ACPI power off actually works. Before this the S5 path never fired at all, because the tables omitted `_S5`. |
+| **Whole-machine snapshots** | `snapshots-20260924` | A `machine.snapshot` directory: restored automatically at startup, saved with and resumed by R_Ctrl+F2, written atomically (build `<path>.tmp`, then rename), and validated against the host CPU in `host.yaml` when moved between machines. See [Snapshots](#snapshots). |
+| **SDL viewer display and audio** | `working-20260923` | Fills the window when it is created and refreshes after redraws. On the audio side, picks an available capture device instead of failing under PipeWire, and loops partial `snd_pcm_writei` writes that were dropping frames. |
+| **Optional virtio-fs limits** | `working-20260923` | `disk_size: 0` now means "no limit" rather than asserting when the shared directory is larger than the configured size. |
+| **Configuration documentation** | `snapshots-20260924` | The [Configuration](#configuration), [Snapshots](#snapshots) and [UEFI boot](#uefi-boot) sections. UEFI is documented as *tested and not working* here, which contradicts upstream's roadmap claim. |
+
+The fork's scope is deliberately narrow - see [Goal](#goal) above. It is not
+aimed at becoming a general QEMU replacement.
+
 ## Roadmap And Current Status
 
 What's supported now:
@@ -32,7 +56,7 @@ What's supported now:
 ### Basic functions
 
 1. 440FX ✅ / Q35 Chipset ✅
-2. SeaBIOS ✅ OVMF ✅
+2. SeaBIOS ✅ OVMF ❌ (tested, does not work here - see [UEFI boot](#uefi-boot))
 3. Memory Region Management ✅
 4. IOPort Management ✅
 5. Devices Management ✅
@@ -101,6 +125,138 @@ meson compile -C build
 
 ./build/mvisor -c config/sample.yaml -vnc 5900
 ```
+
+## Configuration
+
+A machine is described by a YAML file with three top-level keys:
+
+```yaml
+name: Windows 11 LTSC      # optional, the VM name
+base: q35.yaml             # optional, inherit from another config file
+machine:
+  ...
+objects:
+  - class: q35-host
+  - class: qxl
+  ...
+```
+
+`base` is resolved relative to the config file. Values in the current file
+override the base's `machine` section, while the base's `objects` are loaded
+first, so a child file only has to add its own devices.
+
+### machine
+
+| key | format | default | meaning |
+|---|---|---|---|
+| `memory` | `<n>G` or `<n>M` | | guest RAM. **The unit suffix is required** |
+| `vcpu` | integer | | number of vCPUs. **Must be even** unless it is exactly 1; the guest is told 2 threads per core |
+| `bios` | path | `share/bios-256k.bin` | firmware image; it is mapped at the top of the 4GB address space |
+| `priority` | -20..19 | 1 | `nice` value applied to **every vCPU thread** (not the mvisor process). Lower means higher priority; `0` leaves the kernel default |
+| `debug` | yes/no | No | per-device verbose tracing, see below |
+| `hypervisor` | yes/no | No | set the CPUID hypervisor bit and inject Hyper-V enlightenments (PV clock, IPI, EOI, TLB flush). Lowers CPU usage, mainly useful for Windows guests |
+| `powerdown` | `quit`/`pause` | `quit` | what to do when the guest requests an ACPI S5 power off |
+| `snapshot` | path | | whole-machine snapshot directory, see [Snapshots](#snapshots) |
+| `cpuid` | mapping | | guest CPU signature, see [CPU model](#cpu-model) |
+
+Two of them are easy to get wrong: `memory` **must** carry a `G`/`M` suffix (a
+bare number panics), and `vcpu` **must be even** unless it is exactly 1.
+
+#### A note on `debug`
+
+`debug` is not a logging on/off switch. mvisor's logger filters nothing:
+`debug:` lines from `MV_LOG` are written to stdout all the time. This flag
+opens a second, far more verbose set of messages that the code guards
+explicitly - per-port IO/MMIO registration and access, AHCI/IDE command
+tracing, display mode changes, thread lifecycle. Use it to chase a specific
+device, not to control how much you see.
+
+#### Why `vcpu` must be even
+
+mvisor takes no topology as input; it derives one, and the derivation is
+hard-coded to a single socket with SMT:
+
+```cpp
+// core/configuration.cc
+if (num_vcpus_ == 1) {
+  num_cores_ = 1;
+  num_threads_ = 1;
+} else {
+  MV_ASSERT(num_vcpus_ % 2 == 0);      // <- the even-number requirement
+  num_threads_ = 2;
+  num_cores_ = num_vcpus_ / num_threads_;
+}
+```
+
+So an 8-vCPU guest is presented as **1 socket, 4 cores, 2 threads per core**,
+and that shape is written into CPUID leaf 4 (`core/vcpu.cc`), where L2 is
+reported as shared by the 2 threads and L3 by every vCPU. There is no
+`num_sockets_`: the socket count is implicitly 1, and there is no ACPI PPTT to
+describe the hierarchy either, so Windows falls back to CPUID and SMBIOS.
+
+Three consequences:
+
+- **`vcpu` must be even** unless it is exactly 1, because every core has to
+  carry a complete SMT pair. This comes from the "emulate one modern SMT CPU"
+  design choice, not from a KVM limit.
+- **The SMT claim is not backed by pinning.** mvisor does not pin vCPU threads,
+  so the host may place the two vCPUs of a "core" anywhere, including on
+  different physical cores or NUMA nodes. A guest that trusts this topology for
+  co-scheduling or cache-sharing decisions is optimizing on fiction. This is the
+  same reason libvirt's maintainer advises never exposing `threads != 1` unless
+  the vCPUs are pinned 1:1 to host CPUs.
+- **vCPU hotplug is not implemented**, and the fixed `threads=2` would be the
+  first obstacle if it were. QEMU hits the same wall from the other side: with
+  `threads > 1` it cannot emit ACPI processor containers, because `package-id=0`
+  and `core-id=0` would collide.
+
+For comparison, this is the opposite of what a libvirt VM does by default. There,
+omitting `<topology>` means libvirt explicitly asks QEMU for
+`sockets = vCPUs, cores = 1, threads = 1` - it deliberately does not follow
+QEMU 6.2's own change of default to `sockets = 1, cores = vCPUs`. That
+"socket per vCPU" layout is convenient for vCPU hotplug but collides with
+Windows' per-socket licensing limits, which is why a Windows guest can end up
+reporting all vCPUs in Device Manager while using only 2 in Task Manager.
+
+### objects
+
+Each entry instantiates one device:
+
+```yaml
+objects:
+  - class: virtio-vgpu     # device class (required)
+    parent: ich9-hda       # optional, normally inferred from the class
+    debug: Yes             # optional, verbose tracing for this device only
+    memory: 1G
+    node: /dev/dri/renderD128
+```
+
+`parent` names another object explicitly when the default parent inferred from
+the class is not what you want; `debug` is the per-device counterpart of the
+machine-wide flag above.
+
+The classes that take configuration keys:
+
+| class | keys |
+|---|---|
+| `ata-disk` `ata-cdrom` `ide-disk` `ide-cdrom` `ahci-disk` `ahci-cdrom` `virtio-block` `floppy` | `image` (path), `readonly` (yes/no), `snapshot` (yes/no - discard writes when the VM exits) |
+| `virtio-network` | `mac`, `backend` (`tap`/`user`), `mtu`, `ifname` (tap), `map` (user, e.g. `tcp:0.0.0.0:8022-:22`) |
+| `virtio-fs` | `path`, `disk_name`, `disk_size`, `inode_count` |
+| `virtio-vgpu` | `memory`, `staging`, `blob`, `node` |
+| `vfio-pci` | `sysfs` |
+| `qxl` | `vram_size`, `vga_size`, `rom` |
+| `vga` | `vram_size`, `rom` |
+| `ivshmem` | `shmem_path`, `shmem_size` |
+| `cmos` | `rtc` (`localtime`/`gmtime`) |
+| `apple-smc` | `osk` |
+| `spice-agent` `qemu-guest-agent` | `max_clipboard` |
+
+The remaining classes take no options: `q35-host`, `i440fx-host`, `kvm-irqchip`,
+`kvm-clock`, `firmware-config`, `debug-console`, `dummy-device`, `ich9-lpc`,
+`ich9-hda`, `hda-duplex`, `ich9-ahci`, `ich9-smbus`, `piix3`, `piix3-ide`,
+`piix3-uhci`, `piix4-pm`, `ps2`, `uart`, `i8257-dma`, `i82078-fdc`, `pvpanic`,
+`usb-keyboard`, `usb-tablet`, `usb-wacom`, `usb-midi`, `xhci-host`,
+`virtio-console`, `webdav-agent`.
 
 ## CPU model
 
@@ -182,6 +338,69 @@ This is the only reliable power-off signal: a guest that crashed or hung never
 sets the `SLP_EN` bit, so it cannot be mistaken for a shutdown -- mvisor keeps
 running, which is what you want when debugging. Sleep states (S1-S4) are not
 implemented and are ignored with a warning instead of aborting the VM.
+
+## Snapshots
+
+Point `machine.snapshot` at a directory and mvisor keeps a whole-machine
+snapshot there (RAM, device and vCPU state, disk state and the configuration):
+
+```yaml
+machine:
+  snapshot: /root/vms/w11-snapshot
+```
+
+| | directory absent | directory present and complete |
+|---|---|---|
+| **on startup** | nothing happens, the guest boots normally | the snapshot is loaded and the machine resumes right away |
+| **R_Ctrl+F2** | created, then the machine keeps running | refreshed in place, then the machine keeps running |
+
+Note that R_Ctrl+F2 no longer leaves the machine paused, so F11 is not needed
+afterwards. Without `machine.snapshot` the shortcut keeps writing to
+`/tmp/save` as before.
+
+Three things worth knowing:
+
+- **Updates are atomic.** A save goes into `<snapshot>.tmp` and is only renamed
+  into place once the whole image is complete, so an interrupted save cannot
+  destroy the previous snapshot.
+- **The directory is self-contained.** It carries `configuration.yaml` and
+  `host.yaml`, so it can be copied to another machine and started with
+  `-c <snapshot>/configuration.yaml`.
+- **Cross-host restores are validated** against `host.yaml`: a snapshot taken
+  on a host with a **different CPU vendor is refused** (a memory image carries
+  MSRs and FPU state that do not move across vendors), while a different CPU
+  model, RAM size or vCPU count only warns.
+
+## UEFI boot
+
+`machine.bios` is loaded at the top of the 4GB address space, so pointing it at
+an OVMF build is how you would switch the guest to UEFI:
+
+```yaml
+machine:
+  bios: /path/to/OVMF.fd
+```
+
+OVMF is normally shipped as two files. Concatenate them, code first, to get the
+single image mvisor expects (this example yields a 2MB image):
+
+```bash
+cat OVMF_CODE.fd OVMF_VARS.fd > OVMF.fd    # 1920K + 128K = 2MB
+```
+
+**Status: tested, and it does not work.** An OVMF image loads and starts
+executing (the vcpu stays busy) but never produces any graphics output, so the
+guest never appears. This was reproduced in the open-source build with 2MB and
+4MB OVMF images, with both `qxl` and `vga`, with `cpuid.type: host_passthrough`,
+and with the SeaBIOS-specific 1MB mapping disabled - the screen stayed black in
+every case, while the same setup with SeaBIOS works. The fw_cfg entries, ACPI
+tables and PCI ids that OVMF needs are all present, so the gap is deeper in the
+emulation.
+
+The mechanism above is documented only to explain how the firmware file is
+loaded, not because it is usable: **UEFI boot is not supported. Use SeaBIOS,
+which is the default.** A UEFI guest with Secure Boot would in addition need a
+TPM, which mvisor does not emulate.
 
 ## Paravirtualized Drivers
 An ISO image file is needed to install OS. Edit YAML file to configure image path.

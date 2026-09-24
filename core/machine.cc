@@ -22,11 +22,16 @@
 
 #include <linux/kvm.h>
 #include <sys/ioctl.h>
+#include <cpuid.h>
+#include <cstdio>
 #include <fcntl.h>
+#include <fstream>
 #include <unistd.h>
 #include <cstring>
 
 #include <filesystem>
+
+#include <yaml-cpp/yaml.h>
 
 #include "logger.h"
 #include "disk_image.h"
@@ -523,6 +528,100 @@ void Machine::Load(uint16_t port) {
 }
 
 /* Should be called by UI thread */
+/* Decode the host CPU signature the same way CPU_VERSION() encodes it. */
+static void GetHostSignature(std::string& vendor, uint32_t& family, uint32_t& model, uint32_t& stepping) {
+  unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+  __cpuid(0, eax, ebx, ecx, edx);
+  char v[13] = {};
+  memcpy(&v[0], &ebx, 4);
+  memcpy(&v[4], &edx, 4);
+  memcpy(&v[8], &ecx, 4);
+  vendor = v;
+
+  __cpuid(1, eax, ebx, ecx, edx);
+  uint32_t base_family = (eax >> 8) & 0xF;
+  uint32_t base_model = (eax >> 4) & 0xF;
+  uint32_t ext_family = (eax >> 20) & 0xFF;
+  uint32_t ext_model = (eax >> 16) & 0xF;
+  family = (base_family == 0xF) ? base_family + ext_family : base_family;
+  model = (base_family == 0x6 || base_family == 0xF) ? ((ext_model << 4) | base_model) : base_model;
+  stepping = eax & 0xF;
+}
+
+/* A snapshot is usable once both the RAM image and the saved configuration
+ * are present. */
+bool Machine::IsSnapshotUsable(const std::string& path) {
+  for (auto name : { "/memory/BIOS", "/memory/RAM", "/configuration.yaml" }) {
+    if (!std::filesystem::exists(path + name)) {
+      MV_LOG("snapshot %s is incomplete (missing %s), starting fresh", path.c_str(), name);
+      return false;
+    }
+  }
+  return true;
+}
+
+void Machine::SaveHostFingerprint(const std::string& path) {
+  std::string vendor;
+  uint32_t family, model, stepping;
+  GetHostSignature(vendor, family, model, stepping);
+
+  YAML::Node root;
+  root["cpu"]["vendor"] = vendor;
+  root["cpu"]["family"] = family;
+  root["cpu"]["model"] = model;
+  root["cpu"]["stepping"] = stepping;
+  root["machine"]["ram_size"] = ram_size_;
+  root["machine"]["vcpus"] = num_vcpus_;
+
+  std::ofstream ofs(path + "/host.yaml", std::ios::out);
+  if (!ofs.is_open()) {
+    MV_WARN("failed to write the host fingerprint into %s", path.c_str());
+    return;
+  }
+  ofs << root << std::endl;
+}
+
+bool Machine::CheckHostFingerprint(const std::string& path) {
+  auto file = path + "/host.yaml";
+  if (!std::filesystem::exists(file)) {
+    MV_WARN("snapshot %s has no host fingerprint, skipping the compatibility check", path.c_str());
+    return true;
+  }
+
+  std::string vendor;
+  uint32_t family, model, stepping;
+  GetHostSignature(vendor, family, model, stepping);
+
+  YAML::Node root = YAML::LoadFile(file);
+  auto saved_vendor = root["cpu"]["vendor"].as<std::string>();
+  auto saved_family = root["cpu"]["family"].as<uint32_t>();
+  auto saved_model = root["cpu"]["model"].as<uint32_t>();
+  auto saved_ram = root["machine"]["ram_size"].as<uint64_t>();
+  auto saved_vcpus = root["machine"]["vcpus"].as<int>();
+
+  /* A memory image carries MSRs and FPU state that do not move across vendors,
+   * so a vendor change is fatal. Everything else is only a warning: the guest
+   * may well come up fine. */
+  if (saved_vendor != vendor) {
+    MV_ERROR("snapshot was taken on a '%s' host but this host is '%s'; refusing to restore it",
+      saved_vendor.c_str(), vendor.c_str());
+    return false;
+  }
+  if (saved_family != family || saved_model != model) {
+    MV_WARN("snapshot CPU signature %u/%u differs from this host's %u/%u; continuing",
+      saved_family, saved_model, family, model);
+  }
+  if (saved_ram != ram_size_) {
+    MV_WARN("snapshot was taken with %lu bytes of RAM, this machine has %lu; continuing",
+      (unsigned long)saved_ram, (unsigned long)ram_size_);
+  }
+  if (saved_vcpus != num_vcpus_) {
+    MV_WARN("snapshot was taken with %d vcpus, this machine has %d; continuing",
+      saved_vcpus, num_vcpus_);
+  }
+  return true;
+}
+
 void Machine::Save(const std::string path) {
   MV_ASSERT(!saving_);
   /* Make sure the machine is paused */
@@ -533,6 +632,9 @@ void Machine::Save(const std::string path) {
   MV_LOG("start saving");
 
   MigrationFileWriter writer(path);
+  /* Everything below goes into the writer's temporary directory; Commit()
+   * publishes it only once the whole image is complete, so an interrupted save
+   * cannot damage an existing snapshot. */
   /* Save device states */
   if (!device_manager_->SaveState(&writer)) {
     MV_ERROR("failed to save device states");
@@ -553,10 +655,14 @@ void Machine::Save(const std::string path) {
     goto end;
   }
   /* Save configuration after saving disk images (paths might changed) */
-  if (!config_->Save(path + "/configuration.yaml")) {
+  if (!config_->Save(writer.base_path() + "/configuration.yaml")) {
     MV_ERROR("failed to save configuration yaml");
     goto end;
   }
+  /* Record which host produced this image, so restoring it elsewhere can be
+   * validated, then publish the snapshot. */
+  SaveHostFingerprint(writer.base_path());
+  writer.Commit();
 
 end:
   saving_ = false;

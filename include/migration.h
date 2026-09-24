@@ -85,12 +85,20 @@ class MigrationFileWriter : public MigrationWriter {
   virtual bool WriteProtobuf(std::string tag, const Message& message);
   virtual bool WriteMemoryPages(std::string tag, void* pages, size_t size);
 
-  inline std::string base_path() { return base_path_; }
+  /* Publish the snapshot: the temporary directory built so far is renamed onto
+   * the final path. Until this is called the previous snapshot is left
+   * untouched, so a failed or interrupted save can never destroy it. */
+  void Commit();
+
+  /* Directory currently being written to (the temporary one until Commit). */
+  inline std::string base_path() { return temp_path_; }
 
  private:
   int         fd_ = -1;
   std::string prefix_;
   std::string base_path_;
+  std::string temp_path_;
+  bool        committed_ = false;
 };
 
 class MigrationNetworkWriter : public MigrationWriter {

@@ -28,16 +28,43 @@
 
 
 MigrationFileWriter::MigrationFileWriter(std::string base_path) {
-if (std::filesystem::exists(base_path)) {
-    std::filesystem::remove_all(base_path);
-  }
-  std::filesystem::create_directory(base_path);
-
+  /* Everything is written into a temporary directory next to the target and
+   * only Commit() moves it into place, so an interrupted save can never
+   * destroy an existing snapshot. */
   base_path_ = base_path;
+  temp_path_ = base_path + ".tmp";
+
+  std::error_code ec;
+  std::filesystem::remove_all(temp_path_, ec);
+  std::filesystem::create_directories(temp_path_, ec);
+  MV_ASSERT(!ec);
 }
 
 MigrationFileWriter::~MigrationFileWriter() {
-  
+  if (!committed_) {
+    /* The save failed or was abandoned: drop the partial image and leave any
+     * previous snapshot in place. */
+    std::error_code ec;
+    std::filesystem::remove_all(temp_path_, ec);
+  }
+}
+
+void MigrationFileWriter::Commit() {
+  if (committed_) {
+    return;
+  }
+  std::error_code ec;
+  /* Move the old snapshot aside before putting the new one in place, so the
+   * final path only ever holds a complete snapshot. */
+  if (std::filesystem::exists(base_path_)) {
+    std::filesystem::rename(base_path_, base_path_ + ".old", ec);
+    if (ec) {
+      std::filesystem::remove_all(base_path_);
+    }
+  }
+  std::filesystem::rename(temp_path_, base_path_);
+  std::filesystem::remove_all(base_path_ + ".old", ec);
+  committed_ = true;
 }
 
 void MigrationFileWriter::SetPrefix(std::string prefix) {
@@ -85,7 +112,7 @@ bool MigrationFileWriter::WriteMemoryPages(std::string tag, void* pages, size_t 
 
 int MigrationFileWriter::BeginWrite(std::string tag) {
   MV_ASSERT(fd_ == -1);
-  auto full_path = std::filesystem::path(base_path_) / prefix_;
+  auto full_path = std::filesystem::path(temp_path_) / prefix_;
   if (!std::filesystem::exists(full_path)) {
     std::filesystem::create_directories(full_path);
   }

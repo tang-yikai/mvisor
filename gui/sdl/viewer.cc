@@ -544,9 +544,16 @@ void Viewer::SendPointerEvent() {
 
 void Viewer::SetupKeyboardShortcuts() {
   keyboard_shortcuts_[SDLK_F2] = [this]() {
-    MV_LOG("Save");
+    /* Snapshot into machine.snapshot when configured, otherwise keep the
+     * historical /tmp/save location. */
+    auto path = machine_->snapshot_path().empty() ? std::string("/tmp/save")
+                                                  : machine_->snapshot_path();
+    MV_LOG("Save to %s", path.c_str());
     machine_->Pause();
-    machine_->Save("/tmp/save");
+    machine_->Save(path);
+    /* Machine::Save() pauses the machine, so resume here to keep the guest
+     * running instead of leaving it halted until F11 is pressed. */
+    machine_->Resume();
   };
 
   keyboard_shortcuts_[SDLK_F3] = [this]() {

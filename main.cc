@@ -219,6 +219,18 @@ int main(int argc, char* argv[]) {
       machine->Load(atoi(migration_port.c_str()));
     } else if (!load_path.empty()) {
       machine->Load(load_path);
+    } else if (!machine->snapshot_path().empty()) {
+      /* machine.snapshot is configured: if it holds a complete image, restore
+       * it here and let the machine resume below. */
+      const auto& snapshot = machine->snapshot_path();
+      if (machine->IsSnapshotUsable(snapshot)) {
+        if (machine->CheckHostFingerprint(snapshot)) {
+          MV_LOG("restoring snapshot from %s", snapshot.c_str());
+          machine->Load(snapshot);
+        } else {
+          MV_PANIC("refusing to restore the snapshot in %s", snapshot.c_str());
+        }
+      }
     }
 
     const char* displayVar = std::getenv("DISPLAY");

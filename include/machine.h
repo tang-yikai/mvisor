@@ -58,6 +58,16 @@ class Machine {
   void Load(const std::string path);
   const char* GetStatus();
 
+  /* Snapshot helpers, used when machine.snapshot is configured.
+   * IsSnapshotUsable() reports whether the directory holds a complete image.
+   * CheckHostFingerprint() refuses to restore a snapshot taken on a host with
+   * a different CPU vendor (a memory image cannot move across vendors), while
+   * other differences such as the exact CPU model only warn.
+   * SaveHostFingerprint() records that information next to the snapshot. */
+  bool IsSnapshotUsable(const std::string& path);
+  bool CheckHostFingerprint(const std::string& path);
+  void SaveHostFingerprint(const std::string& path);
+
   bool Save(const std::string ip, const uint16_t port);
   bool PostSave();
   void Load(uint16_t port);
@@ -79,6 +89,7 @@ class Machine {
   inline bool debug() { return debug_; }
   inline bool hypervisor() { return hypervisor_; }
   inline bool powerdown_quit() { return powerdown_quit_; }
+  inline const std::string& snapshot_path() { return snapshot_path_; }
   inline const std::string& guest_os() const { return guest_os_; }
   inline const std::string& vm_name() const { return vm_name_; }
   inline const std::string& vm_uuid() const { return vm_uuid_; }
@@ -134,6 +145,11 @@ class Machine {
    *   true  - quit the mvisor process (default)
    *   false - only pause the VM so the state can be inspected */
   bool powerdown_quit_ = true;
+  /* Snapshot directory. Empty means snapshots are disabled.
+   *  - on startup: if it exists and looks valid, the VM state is restored and
+   *    the machine resumes immediately;
+   *  - R_Ctrl+F2: writes (or refreshes) it, then keeps running. */
+  std::string snapshot_path_;
   std::vector<Vcpu*> vcpus_;
   MemoryManager* memory_manager_;
   DeviceManager* device_manager_;
