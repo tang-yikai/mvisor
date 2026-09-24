@@ -56,7 +56,8 @@ struct ImageInformation {
 class Device;
 class DiskImage : public Object {
  public:
-  static DiskImage* Create(Device* host, Device* device, std::string path, bool readonly, bool snapshot);
+  static DiskImage* Create(Device* host, Device* device, std::string path,
+                           bool readonly, bool snapshot, bool discard_unmap = true);
 
   DiskImage();
   virtual ~DiskImage();
@@ -66,6 +67,7 @@ class DiskImage : public Object {
   inline const std::string& filepath() const { return filepath_; }
   inline Device* deivce() { return device_; }
   inline bool snapshot() { return snapshot_; }
+  inline bool discard_unmap() { return discard_unmap_; }
 
   /* Always use this static method to create a DiskImage */
 
@@ -80,6 +82,9 @@ class DiskImage : public Object {
  protected:
   bool        readonly_ = false;
   bool        snapshot_ = false;
+  /* Whether a guest discard may hand clusters back to the host filesystem
+   * (hole punching), or only mark them reusable inside the image. */
+  bool        discard_unmap_ = true;
   /* We lock the host_device when we handle IO request callbacks */
   Device*     host_device_ = nullptr;
   Device*     device_ = nullptr;

@@ -161,6 +161,7 @@ class Qcow2Image : public DiskImage {
   RefcountBlock* NewRefcountBlock(uint64_t block_offset);
   RefcountBlock* GetRefcountBlock(uint64_t cluster_index, uint64_t* rfb_index, bool allocate);
   void FreeCluster(uint64_t start);
+  void PunchHole(uint64_t offset, size_t length);
   uint64_t AllocateCluster();
   L2Table* NewL2Table(uint64_t l2_offset);
   L2Table* ReadL2Table(uint64_t l2_offset);

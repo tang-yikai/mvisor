@@ -69,12 +69,24 @@ void AtaStorageDevice::Connect() {
   /* Connect to backend image */
   bool readonly = has_key("readonly") && std::get<bool>(key_values_["readonly"]);
   bool snapshot = has_key("snapshot") && std::get<bool>(key_values_["snapshot"]);
+  bool discard_unmap = true;
+  if (has_key("discard")) {
+    auto value = std::get<std::string>(key_values_["discard"]);
+    if (value == "unmap") {
+      discard_unmap = true;
+    } else if (value == "ignore") {
+      discard_unmap = false;
+    } else {
+      MV_PANIC("invalid discard value '%s', expected 'unmap' or 'ignore'", value.c_str());
+    }
+  }
   if (type_ == kAtaStorageTypeCdrom) {
     readonly = true;
   }
   if (has_key("image")) {
     auto path = std::get<std::string>(key_values_["image"]);
-    image_ = DiskImage::Create(dynamic_cast<Device*>((Object*)this->parent()), this, path, readonly, snapshot);
+    image_ = DiskImage::Create(dynamic_cast<Device*>((Object*)this->parent()), this, path,
+                               readonly, snapshot, discard_unmap);
   }
 }
 

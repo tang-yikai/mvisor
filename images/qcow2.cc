@@ -19,9 +19,11 @@
 #include "qcow2.h"
 #include <unistd.h>
 #include <fcntl.h>
+#include <linux/falloc.h>
 #include <unistd.h>
 #include <libgen.h>
 #include <sys/stat.h>
+#include <cerrno>
 #include <ctime>
 #include <cstring>
 #include <vector>
@@ -321,8 +323,33 @@ void Qcow2Image::FreeCluster(uint64_t start) {
 
   rfb->entries[rfb_index] = htobe16(be16toh(rfb->entries[rfb_index]) - 1);
   rfb->dirty = true;
-  if (rfb->entries[rfb_index] == 0 && cluster_index < free_cluster_index_) {
-    free_cluster_index_ = cluster_index;
+  if (rfb->entries[rfb_index] == 0) {
+    if (cluster_index < free_cluster_index_) {
+      free_cluster_index_ = cluster_index;
+    }
+    /* The cluster carries no reference any more, so it can go back to the host
+     * filesystem and let the image file actually shrink. Done only after the
+     * refcount and L2 updates above, so an interruption at worst leaks space
+     * instead of leaving a stale reference to a punched cluster. */
+    if (discard_unmap_) {
+      PunchHole(start, cluster_size_);
+    }
+  }
+}
+
+/* Give a cluster back to the host filesystem.
+ * FALLOC_FL_KEEP_SIZE is mandatory: qcow2 addresses clusters by absolute file
+ * offset, so shortening the file would shift every cluster past the hole. */
+void Qcow2Image::PunchHole(uint64_t offset, size_t length) {
+  if (fallocate(fd_, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, length) == 0) {
+    return;
+  }
+  /* Hole punching is optional. The cluster stays reusable inside the image,
+   * which is the behaviour mvisor had before, so an unsupported filesystem is
+   * not worth a warning. */
+  if (errno != EOPNOTSUPP && errno != ENOTSUP && errno != EINVAL) {
+    MV_WARN("failed to punch hole at 0x%lx (%zu bytes): %s",
+      (unsigned long)offset, length, strerror(errno));
   }
 }
 

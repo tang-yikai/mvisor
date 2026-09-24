@@ -41,7 +41,8 @@ DiskImage::~DiskImage()
   }
 }
 
-DiskImage* DiskImage::Create(Device* host, Device* device, std::string path, bool readonly, bool snapshot) {
+DiskImage* DiskImage::Create(Device* host, Device* device, std::string path,
+                             bool readonly, bool snapshot, bool discard_unmap) {
   DiskImage* image;
   if (path.find(".qcow2") != std::string::npos) {
     image = dynamic_cast<Qcow2Image*>(Object::Create("qcow2-image"));
@@ -52,6 +53,7 @@ DiskImage* DiskImage::Create(Device* host, Device* device, std::string path, boo
   image->filepath_ = path;
   image->readonly_ = readonly;
   image->snapshot_ = snapshot;
+  image->discard_unmap_ = discard_unmap;
   image->host_device_ = host;
   image->device_ = device;
   image->Initialize();

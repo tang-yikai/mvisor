@@ -42,6 +42,7 @@ ours. Each change is also a tagged commit.
 | **Configurable CPU model** | `cpuid-20260923` | `machine.cpuid` lets you pick the vendor/model and a `type` + `arch` pair, plus VMX/SVM exposure through `virt`. Also fixes AMD family decoding, which truncated `0x17`/`0x19` to `7`. |
 | **Guest power off exits mvisor** | `poweroff-20260924` | Declares `_S5` in the i440fx and q35 DSDTs and quits when the guest sets `SLP_EN`, so ACPI power off actually works. Before this the S5 path never fired at all, because the tables omitted `_S5`. |
 | **Whole-machine snapshots** | `snapshots-20260924` | A `machine.snapshot` directory: restored automatically at startup, saved with and resumed by R_Ctrl+F2, written atomically (build `<path>.tmp`, then rename), and validated against the host CPU in `host.yaml` when moved between machines. See [Snapshots](#snapshots). |
+| **Discard returns space to the host** | `discard-unmap-20260924` | A guest discard now punches a hole instead of only freeing the cluster inside the image, so the qcow2 file actually shrinks. Per-device `discard: unmap\|ignore`, defaulting to `unmap`. See [Discard](#discard). |
 | **SDL viewer display and audio** | `working-20260923` | Fills the window when it is created and refreshes after redraws. On the audio side, picks an available capture device instead of failing under PipeWire, and loops partial `snd_pcm_writei` writes that were dropping frames. |
 | **Optional virtio-fs limits** | `working-20260923` | `disk_size: 0` now means "no limit" rather than asserting when the shared directory is larger than the configured size. |
 | **Configuration documentation** | `snapshots-20260924` | The [Configuration](#configuration), [Snapshots](#snapshots) and [UEFI boot](#uefi-boot) sections. UEFI is documented as *tested and not working* here, which contradicts upstream's roadmap claim. |
@@ -239,7 +240,7 @@ The classes that take configuration keys:
 
 | class | keys |
 |---|---|
-| `ata-disk` `ata-cdrom` `ide-disk` `ide-cdrom` `ahci-disk` `ahci-cdrom` `virtio-block` `floppy` | `image` (path), `readonly` (yes/no), `snapshot` (yes/no - discard writes on exit, see [Disk snapshots](#disk-snapshots)) |
+| `ata-disk` `ata-cdrom` `ide-disk` `ide-cdrom` `ahci-disk` `ahci-cdrom` `virtio-block` `floppy` | `image` (path), `readonly` (yes/no), `snapshot` (yes/no - discard writes on exit), `discard` (unmap/ignore) - see [Disk snapshots and discard](#disk-snapshots-and-discard) |
 | `virtio-network` | `mac`, `backend` (`tap`/`user`), `mtu`, `ifname` (tap), `map` (user, e.g. `tcp:0.0.0.0:8022-:22`) |
 | `virtio-fs` | `path`, `disk_name`, `disk_size`, `inode_count` |
 | `virtio-vgpu` | `memory`, `staging`, `blob`, `node` |
@@ -371,7 +372,9 @@ Three things worth knowing:
   MSRs and FPU state that do not move across vendors), while a different CPU
   model, RAM size or vCPU count only warns.
 
-## Disk snapshots
+## Disk snapshots and discard
+
+### Snapshots
 
 Three different things are called "snapshot", and they do not overlap:
 
@@ -401,6 +404,50 @@ Two things to avoid:
   supported yet")`).
 - **Stop mvisor before taking an external snapshot.** It keeps write caches, so
   snapshotting a live image captures an inconsistent disk state.
+
+### Discard
+
+When a guest discards blocks - `fstrim`, Windows' `Optimize-Volume -ReTrim`, or
+just deleting files on a filesystem mounted with `-o discard` - mvisor releases
+the matching qcow2 clusters. By default it also hands that space back to the
+host filesystem, so the image file actually shrinks:
+
+```yaml
+objects:
+  - class: virtio-block
+    image: /path/to/disk.qcow2
+    discard: unmap      # default: free the clusters and return the space
+    # discard: ignore   # only mark clusters reusable inside the image
+```
+
+Measured on a 1G qcow2 with 200M written inside it, discarding those 200M moves
+the file from 200 MiB of allocated blocks to 260 KiB, while its length is left
+alone. `ignore` leaves both untouched. An unrecognised value panics at startup
+rather than silently falling back.
+
+How it works, and what it does not do:
+
+- **The space comes back as a hole.** Each freed cluster gets
+  `fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)`. `KEEP_SIZE` matters:
+  qcow2 addresses clusters by absolute file offset, so trimming the file would
+  move every cluster past the hole.
+- **It only runs when the guest discards**, so it is off the hot path, and the
+  hole punch happens only after the refcount drops to zero and the L2 entry is
+  cleared.
+- **An unsupported filesystem is not an error.** If hole punching returns
+  `EOPNOTSUPP`/`ENOTSUP`/`EINVAL` the call is dropped and the image behaves as
+  under `ignore` - clusters stay reusable, the file just does not shrink.
+- **qcow2 only.** virtio-block advertises `VIRTIO_BLK_F_DISCARD` and
+  `VIRTIO_BLK_F_WRITE_ZEROES` only for qcow2 images, so a raw image never
+  receives a discard at all. ATA disks advertise TRIM only when discards are
+  passed through.
+- **This is not compaction.** Discard frees clusters wherever they sit; it never
+  moves data down. To produce a minimal file offline, stop mvisor and run
+  `qemu-img convert -O qcow2 disk.qcow2 compact.qcow2`, then replace the image -
+  and re-take any `machine.snapshot`, since it embeds disk state.
+- **`fallocate -d` will not help here.** QEMU writes zeros when it discards, so
+  the host can detect the holes; mvisor only drops the reference and leaves the
+  bytes in place, so there is nothing for `fallocate --dig-holes` to find.
 
 ## UEFI boot
 

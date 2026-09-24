@@ -538,7 +538,9 @@ void AtaDisk::Ata_IdentifyDevice() {
       p[110] = drive_info_.world_wide_name >> 16;
       p[111] = drive_info_.world_wide_name;
   }
-  p[169] = 1; /* TRIM support */
+  /* Advertise TRIM only when discards really reach the image. Identify is only
+   * requested for a device with a medium, so image_ is set here. */
+  p[169] = (image_ && image_->discard_unmap()) ? 1 : 0;
   p[217] = 0; /* Nominal media rotation rate */
 
   /* update size */

@@ -63,12 +63,26 @@ class VirtioBlock : public VirtioPci {
     /* Connect to backend image */
     bool readonly = has_key("readonly") && std::get<bool>(key_values_["readonly"]);
     bool snapshot = has_key("snapshot") && std::get<bool>(key_values_["snapshot"]);
+    /* discard: unmap (the default) lets a guest discard return clusters to the
+     * host filesystem so the image actually shrinks; ignore keeps the image as
+     * is and stops advertising discard to the guest. */
+    bool discard_unmap = true;
+    if (has_key("discard")) {
+      auto value = std::get<std::string>(key_values_["discard"]);
+      if (value == "unmap") {
+        discard_unmap = true;
+      } else if (value == "ignore") {
+        discard_unmap = false;
+      } else {
+        MV_PANIC("invalid discard value '%s', expected 'unmap' or 'ignore'", value.c_str());
+      }
+    }
     if (has_key("image")) {
       std::string path = std::get<std::string>(key_values_["image"]);
-      image_ = DiskImage::Create(this, this, path, readonly, snapshot);
+      image_ = DiskImage::Create(this, this, path, readonly, snapshot, discard_unmap);
 
       /* Qcow2 supports disacard & write zeros */
-      if (path.find(".qcow2") != std::string::npos) {
+      if (path.find(".qcow2") != std::string::npos && discard_unmap) {
         device_features_ |=  (1UL << VIRTIO_BLK_F_DISCARD) | (1UL << VIRTIO_BLK_F_WRITE_ZEROES);
       }
     }
