@@ -40,7 +40,7 @@ class Configuration {
 
  private:
   void InitializePaths();
-  bool LoadFile(std::string path);
+  bool LoadFile(std::string path, bool is_base = false);
   void LoadMachine(const YAML::Node& node);
   void LoadObjects(const YAML::Node& node);
   void SaveMachine(YAML::Node& node);

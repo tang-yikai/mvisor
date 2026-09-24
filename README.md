@@ -42,6 +42,7 @@ ours. Each change is also a tagged commit.
 | **Configurable CPU model** | `cpuid-20260923` | `machine.cpuid` lets you pick the vendor/model and a `type` + `arch` pair, plus VMX/SVM exposure through `virt`. Also fixes AMD family decoding, which truncated `0x17`/`0x19` to `7`. |
 | **Guest power off exits mvisor** | `poweroff-20260924` | Declares `_S5` in the i440fx and q35 DSDTs and quits when the guest sets `SLP_EN`, so ACPI power off actually works. Before this the S5 path never fired at all, because the tables omitted `_S5`. |
 | **Whole-machine snapshots** | `snapshots-20260924` | A `machine.snapshot` directory: restored automatically at startup, saved with and resumed by R_Ctrl+F2, written atomically (build `<path>.tmp`, then rename), and validated against the host CPU in `host.yaml` when moved between machines. See [Snapshots](#snapshots). |
+| **Snapshot notifications and naming** | `snapshot-notify-20260924` | R_Ctrl+F2 reports the result through a desktop notification, the unconfigured fallback became a per-machine `/tmp/save/<vm uuid>` instead of a shared `/tmp/save`, and the top-level config's `name:` is now honoured when `-n` is absent. |
 | **Discard returns space to the host** | `discard-unmap-20260924` | A guest discard now punches a hole instead of only freeing the cluster inside the image, so the qcow2 file actually shrinks. Per-device `discard: unmap\|ignore`, defaulting to `unmap`. See [Discard](#discard). |
 | **SDL viewer display and audio** | `working-20260923` | Fills the window when it is created and refreshes after redraws. On the audio side, picks an available capture device instead of failing under PipeWire, and loops partial `snd_pcm_writei` writes that were dropping frames. |
 | **Optional virtio-fs limits** | `working-20260923` | `disk_size: 0` now means "no limit" rather than asserting when the shared directory is larger than the configured size. |
@@ -240,7 +241,7 @@ The classes that take configuration keys:
 
 | class | keys |
 |---|---|
-| `ata-disk` `ata-cdrom` `ide-disk` `ide-cdrom` `ahci-disk` `ahci-cdrom` `virtio-block` `floppy` | `image` (path), `readonly` (yes/no), `snapshot` (yes/no - discard writes on exit), `discard` (unmap/ignore) - see [Disk snapshots and discard](#disk-snapshots-and-discard) |
+| `ata-disk` `ata-cdrom` `ide-disk` `ide-cdrom` `ahci-disk` `ahci-cdrom` `virtio-block` `floppy` | `image` (path), `readonly` (yes/no), `snapshot` (yes/no - writes are discarded on exit), `discard` (unmap/ignore) - see [Disks](#disks) |
 | `virtio-network` | `mac`, `backend` (`tap`/`user`), `mtu`, `ifname` (tap), `map` (user, e.g. `tcp:0.0.0.0:8022-:22`) |
 | `virtio-fs` | `path`, `disk_name`, `disk_size`, `inode_count` |
 | `virtio-vgpu` | `memory`, `staging`, `blob`, `node` |
@@ -356,10 +357,32 @@ machine:
 | **R_Ctrl+F2** | created, then the machine keeps running | refreshed in place, then the machine keeps running |
 
 Note that R_Ctrl+F2 no longer leaves the machine paused, so F11 is not needed
-afterwards. Without `machine.snapshot` the shortcut keeps writing to
-`/tmp/save` as before.
+afterwards.
 
-Three things worth knowing:
+### Where it is stored
+
+`machine.snapshot` is the directory to use; it is created on demand. When the
+key is absent, R_Ctrl+F2 falls back to `/tmp/save/<vm uuid>` - one directory per
+machine, so several virtual machines on one host cannot overwrite each other.
+That fallback is deliberately throwaway: `/tmp` does not survive a reboot, and
+**only an explicit `machine.snapshot` is restored at startup**, so a machine
+without the key always boots from scratch.
+
+### Desktop notification
+
+R_Ctrl+F2 finishes by reporting the result as
+`<HH:MM:SS> 已为 <name> 生成整机快照`, so you can tell that the shortcut fired,
+understand why the guest froze for a moment, and know when the snapshot was
+taken. It is sent after the machine resumes. mvisor shells out to `notify-send`
+(the freedesktop notification service) rather than linking `libnotify`, so it
+gains no build dependency; where there is no notification daemon, such as a
+plain TTY session, nothing happens.
+
+The `<name>` comes from `-n` on the command line, else the `name:` key of the
+**top-level** configuration file, else the machine uuid. A `name:` in a base
+file such as `q35.yaml` is ignored - it names the base, not your machine.
+
+### What is inside
 
 - **Updates are atomic.** A save goes into `<snapshot>.tmp` and is only renamed
   into place once the whole image is complete, so an interrupted save cannot
@@ -372,21 +395,24 @@ Three things worth knowing:
   MSRs and FPU state that do not move across vendors), while a different CPU
   model, RAM size or vCPU count only warns.
 
-## Disk snapshots and discard
+### Three things called "snapshot"
 
-### Snapshots
-
-Three different things are called "snapshot", and they do not overlap:
+Only `machine.snapshot` above is a snapshot in the usual sense. Two per-disk
+keys share the name and mean something else:
 
 | setting | where | type | meaning |
 |---|---|---|---|
-| `machine.snapshot` | `machine:` | path | **whole-machine** snapshot: RAM, device and vCPU state, plus disk state. See [Snapshots](#snapshots) |
+| `machine.snapshot` | `machine:` | path | **whole-machine** snapshot: RAM, device and vCPU state, plus disk state |
 | `snapshot` | a disk device | yes/no | **this run does not persist**: the image is opened as a read-only backing file and every write goes to a temporary `snapshot_XXXXXX.qcow2` beside it (`/tmp/snapshot_XXXXXX.img` for raw images), which is deleted on exit |
 | `readonly` | a disk device | yes/no | **the guest sees a read-only disk**: `VIRTIO_BLK_F_RO` is set, so writes are refused rather than silently discarded |
 
 So `snapshot: yes` is the equivalent of QEMU's `snapshot=on` - handy for booting
 a guest, trying something and throwing the writes away. It is **not** a way to
-create a named, restorable disk snapshot.
+create a named, restorable disk snapshot; see [Disks](#disks) for that.
+
+## Disks
+
+### Disk snapshots outside mvisor
 
 mvisor has no disk-snapshot management of its own; there is no `qemu-img
 snapshot` equivalent. Take disk snapshots **outside** mvisor instead:

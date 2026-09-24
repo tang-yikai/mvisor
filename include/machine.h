@@ -54,7 +54,9 @@ class Machine {
   bool IsValid() { return valid_; }
   bool IsPaused() { return valid_ && paused_; }
   void WaitToQuit();
-  void Save(const std::string path);
+  /* Returns false when any part of the snapshot could not be written; the
+   * previous snapshot is left in place in that case. */
+  bool Save(const std::string path);
   void Load(const std::string path);
   const char* GetStatus();
 

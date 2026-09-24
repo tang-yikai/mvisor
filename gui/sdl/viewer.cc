@@ -542,18 +542,47 @@ void Viewer::SendPointerEvent() {
   }
 }
 
+/* Tell the desktop that a snapshot finished. This deliberately shells out to
+ * notify-send rather than linking libnotify: mvisor gains no build dependency,
+ * and a missing or unreachable notification daemon is quietly ignored. The
+ * point is for the user to confirm the shortcut fired, to understand why the
+ * guest just froze for a few seconds, and to know when the snapshot was taken. */
+static void NotifySnapshot(const std::string& vm_name, bool ok) {
+  char now[16] = {};
+  time_t t = time(nullptr);
+  strftime(now, sizeof(now), "%H:%M:%S", localtime(&t));
+
+  std::string name = vm_name.empty() ? std::string("mvisor") : vm_name;
+  std::string body = std::string(now) +
+    (ok ? " 已为 " + name + " 生成整机快照" : " 为 " + name + " 生成整机快照失败");
+
+  pid_t pid = fork();
+  if (pid == 0) {
+    /* Only async-signal-safe calls are allowed between fork and exec. */
+    execlp("notify-send", "notify-send", "-a", "mvisor", "-i", "media-floppy",
+           name.c_str(), body.c_str(), (char*)nullptr);
+    _exit(127);
+  }
+}
+
 void Viewer::SetupKeyboardShortcuts() {
   keyboard_shortcuts_[SDLK_F2] = [this]() {
-    /* Snapshot into machine.snapshot when configured, otherwise keep the
-     * historical /tmp/save location. */
-    auto path = machine_->snapshot_path().empty() ? std::string("/tmp/save")
-                                                  : machine_->snapshot_path();
+    /* Snapshot into machine.snapshot when configured. Otherwise fall back to a
+     * per-machine directory: a single /tmp/save would make several virtual
+     * machines on one host overwrite each other. */
+    auto path = machine_->snapshot_path();
+    if (path.empty()) {
+      path = "/tmp/save/" + machine_->vm_uuid();
+    }
     MV_LOG("Save to %s", path.c_str());
     machine_->Pause();
-    machine_->Save(path);
+    bool ok = machine_->Save(path);
     /* Machine::Save() pauses the machine, so resume here to keep the guest
      * running instead of leaving it halted until F11 is pressed. */
     machine_->Resume();
+    /* Notify only after resuming, so the guest is already running again by the
+     * time the user sees the message. */
+    NotifySnapshot(machine_->vm_name(), ok);
   };
 
   keyboard_shortcuts_[SDLK_F3] = [this]() {

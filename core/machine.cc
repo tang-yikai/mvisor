@@ -622,7 +622,8 @@ bool Machine::CheckHostFingerprint(const std::string& path) {
   return true;
 }
 
-void Machine::Save(const std::string path) {
+bool Machine::Save(const std::string path) {
+  bool ok = false;
   MV_ASSERT(!saving_);
   /* Make sure the machine is paused */
   if (!IsPaused()) {
@@ -663,10 +664,12 @@ void Machine::Save(const std::string path) {
    * validated, then publish the snapshot. */
   SaveHostFingerprint(writer.base_path());
   writer.Commit();
+  ok = true;
 
 end:
   saving_ = false;
   MV_LOG("done saving");
+  return ok;
 }
 
 /* Should be called by UI thread */

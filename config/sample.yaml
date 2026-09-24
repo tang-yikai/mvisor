@@ -11,6 +11,12 @@ machine:
   debug: No
   # Turn on hypervisor to lower CPU usage (Hyper-V is used for Windows)
   hypervisor: Yes
+  # Whole-machine snapshot directory. R_Ctrl+F2 saves here and immediately
+  # resumes, and a complete snapshot is restored and resumed at startup.
+  # Leave it unset and mvisor falls back to /tmp/save/<vm uuid>, which keeps
+  # several machines on one host apart but does not survive a reboot. Set a
+  # real path when the snapshots should be kept.
+  snapshot: /data/snapshots/default
 
 objects:
   - name: cmos

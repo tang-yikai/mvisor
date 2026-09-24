@@ -74,15 +74,23 @@ bool Configuration::Load(std::string path) {
 }
 
 /* Load configuration file *.yaml */
-bool Configuration::LoadFile(std::string path) {
+bool Configuration::LoadFile(std::string path, bool is_base) {
   path_ = FindPath(path);
   YAML::Node config = YAML::LoadFile(path_);
+
+  /* The top-level file names the machine; a base file's name is not its own.
+   * A -n on the command line wins: main.cc substitutes the uuid when no -n was
+   * given, so comparing against the uuid tells us the name was not set. */
+  if (config["name"] && !is_base && machine_->vm_name_ == machine_->vm_uuid_) {
+    machine_->vm_name_ = config["name"].as<std::string>();
+  }
+
   if (config["base"]) {
     /* Add the current config directory to directories and load base file */
     char temp[1024] = { 0 };
     strcpy(temp, path.c_str());
     directories_.insert(dirname(temp));
-    Load(config["base"].as<std::string>());
+    LoadFile(config["base"].as<std::string>(), true);
   }
 
   if (config["machine"]) {
