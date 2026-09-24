@@ -182,14 +182,22 @@ bool MigrationNetworkReader::ReadRaw(std::string tag, void* data, size_t size) {
 bool MigrationNetworkReader::ReadProtobuf(std::string tag, Message& message) {
   auto cached_data = ReadFromCache(tag);
   if (cached_data) {
-    message.ParsePartialFromArray(cached_data->body, cached_data->header.size);
+    bool ok = message.ParsePartialFromArray(cached_data->body, cached_data->header.size);
     FreeCacheData(cached_data);
+    if (!ok) {
+      MV_ERROR("failed to parse %s", tag.c_str());
+      return false;
+    }
   } else {
     size_t size = WaitForDataHeader(tag).size;
     auto data = new uint8_t[size];
     Read(data, size);
-    message.ParsePartialFromArray(data, size);
+    bool ok = message.ParsePartialFromArray(data, size);
     delete[] data;
+    if (!ok) {
+      MV_ERROR("failed to parse %s", tag.c_str());
+      return false;
+    }
   }
   return true;
 }

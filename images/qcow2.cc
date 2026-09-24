@@ -599,7 +599,7 @@ ssize_t Qcow2Image::BlockIo(void *buffer, off_t position, size_t length, ImageIo
 }
 
 void Qcow2Image::FlushL2Tables () {
-  int l2_table_dirty_count = 0;
+  [[maybe_unused]] int l2_table_dirty_count = 0;
   auto map = l2_cache_.map();
   for (auto it = map.begin(); it != map.end(); it++) {
     auto l2_table = it->second->second;
@@ -611,7 +611,7 @@ void Qcow2Image::FlushL2Tables () {
 }
 
 void Qcow2Image::FlushRefcountBlocks() {
-  int refcount_block_dirty_count = 0;
+  [[maybe_unused]] int refcount_block_dirty_count = 0;
   auto map = rfb_cache_.map();
   for (auto it = map.begin(); it != map.end(); it++) {
     auto rfb = it->second->second;

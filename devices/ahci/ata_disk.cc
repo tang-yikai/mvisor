@@ -406,7 +406,8 @@ void AtaDisk::Ata_Trim() {
     return;
   }
 
-  size_t total_bytes = 0;
+  /* Tallied so the trimmed size can be logged cheaply later. */
+  [[maybe_unused]] size_t total_bytes = 0;
   struct Chunk {
     size_t position;
     size_t length;

@@ -88,7 +88,11 @@ bool MigrationFileWriter::WriteRaw(std::string tag, void* data, size_t size) {
 
 bool MigrationFileWriter::WriteProtobuf(std::string tag, const Message& message) {
   BeginWrite(tag);
-  message.SerializePartialToFileDescriptor(fd_);
+  if (!message.SerializePartialToFileDescriptor(fd_)) {
+    MV_ERROR("failed to serialize %s", tag.c_str());
+    EndWrite(tag);
+    return false;
+  }
   EndWrite(tag);
   return true;
 }
